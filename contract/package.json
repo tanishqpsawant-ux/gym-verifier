@@ -1,0 +1,9 @@
+{
+  "name": "@gymproof/contract",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "compact": "compact compile src/gymproof.compact ./src/managed/gymproof",
+    "test": "vitest run"
+  }
+}
