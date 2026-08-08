@@ -1,0 +1,192 @@
+// GymProof — privacy-first fitness achievement verification on Midnight.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Language version and idioms follow the reference example-bboard project
+// (pragma 0.23, CompactStandardLibrary, witness-backed private state).
+//
+// PRIVACY MODEL
+// -------------
+// Nothing about an athlete's workouts is ever written to the ledger.
+// The full workout log (dates, exercises, weights, reps, notes) lives only in
+// the local private state and is supplied to circuits through witnesses.
+// Circuits assert the requirement over that private data and disclose ONLY:
+//   - an athlete commitment (hash of a local secret key, unlinkable to a wallet)
+//   - the challenge identifier that was satisfied
+//   - the resulting achievement identifier
+// The proof convinces the network that the assertion held, without revealing
+// the private inputs it held over.
+
+pragma language_version 0.23;
+
+import CompactStandardLibrary;
+
+/** A fitness challenge, publicly readable. */
+export struct Challenge {
+  requiredWorkouts: Uint<32>;
+  requiredStreak: Uint<32>;
+  requiredStrengthKg: Uint<32>;
+  windowDays: Uint<32>;
+  active: Boolean;
+}
+
+/** Registered athletes, identified only by a commitment to a local secret. */
+export ledger athletes: Set<Bytes<32>>;
+
+/** Challenge definitions, keyed by challenge id. */
+export ledger challenges: Map<Bytes<32>, Challenge>;
+
+/** Athlete commitments that have joined a given challenge. */
+export ledger participants: Map<Bytes<32>, Set<Bytes<32>>>;
+
+/** Verified achievements: achievement id -> athlete commitment. */
+export ledger achievements: Map<Bytes<32>, Bytes<32>>;
+
+/** Verified achievements: achievement id -> challenge id. */
+export ledger achievementChallenge: Map<Bytes<32>, Bytes<32>>;
+
+/** Total number of verified achievements (used for the anonymous leaderboard). */
+export ledger verifiedCount: Counter;
+
+constructor() {
+  verifiedCount.increment(0);
+}
+
+/* ------------------------------------------------------------------ *
+ * Witnesses — the private side of GymProof.
+ * ------------------------------------------------------------------ */
+
+/** The athlete's local secret key. Never leaves the device. */
+witness localSecretKey(): Bytes<32>;
+
+/** Number of workouts the athlete privately logged inside the challenge window. */
+witness workoutsInWindow(challengeId: Bytes<32>): Uint<32>;
+
+/** The athlete's longest privately recorded consecutive-day streak. */
+witness longestStreak(): Uint<32>;
+
+/** The athlete's best privately recorded single-lift load, in kilograms. */
+witness bestLiftKg(): Uint<32>;
+
+/* ------------------------------------------------------------------ *
+ * Pure circuits
+ * ------------------------------------------------------------------ */
+
+/** Derives the public athlete commitment from a local secret key. */
+export circuit athleteCommitment(sk: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "gymproof:athlete:"), sk]);
+}
+
+/** Derives a deterministic achievement id for an (athlete, challenge) pair. */
+export circuit achievementId(athlete: Bytes<32>, challengeId: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "gymproof:achv:"), athlete, challengeId]);
+}
+
+/* ------------------------------------------------------------------ *
+ * Impure circuits
+ * ------------------------------------------------------------------ */
+
+/** Registers the caller as an athlete under a pseudonymous commitment. */
+export circuit registerAthlete(): [] {
+  const me = disclose(athleteCommitment(localSecretKey()));
+  assert(!athletes.member(me), "Athlete already registered");
+  athletes.insert(me);
+}
+
+/** Publishes a challenge definition. */
+export circuit createChallenge(
+  challengeId: Bytes<32>,
+  requiredWorkouts: Uint<32>,
+  requiredStreak: Uint<32>,
+  requiredStrengthKg: Uint<32>,
+  windowDays: Uint<32>
+): [] {
+  assert(!challenges.member(disclose(challengeId)), "Challenge already exists");
+  challenges.insert(
+    disclose(challengeId),
+    Challenge {
+      requiredWorkouts: disclose(requiredWorkouts),
+      requiredStreak: disclose(requiredStreak),
+      requiredStrengthKg: disclose(requiredStrengthKg),
+      windowDays: disclose(windowDays),
+      active: true
+    }
+  );
+  participants.insert(disclose(challengeId), default<Set<Bytes<32>>>);
+}
+
+/** Joins an existing, active challenge. */
+export circuit joinChallenge(challengeId: Bytes<32>): [] {
+  const id = disclose(challengeId);
+  assert(challenges.member(id), "Unknown challenge");
+  assert(challenges.lookup(id).active, "Challenge is not active");
+  const me = disclose(athleteCommitment(localSecretKey()));
+  assert(athletes.member(me), "Athlete is not registered");
+  participants.lookup(id).insert(me);
+}
+
+/**
+ * THE CORE ZERO-KNOWLEDGE CIRCUIT.
+ *
+ * Proves "I completed at least `requiredWorkouts` workouts inside this
+ * challenge window" without disclosing any workout. The private count comes
+ * from the `workoutsInWindow` witness; the assertion is enforced inside the
+ * proof, so a false claim cannot produce a valid transaction.
+ */
+export circuit proveChallengeCompletion(challengeId: Bytes<32>): Bytes<32> {
+  const id = disclose(challengeId);
+  assert(challenges.member(id), "Unknown challenge");
+  const challenge = challenges.lookup(id);
+  assert(challenge.active, "Challenge is not active");
+
+  const me = athleteCommitment(localSecretKey());
+  assert(participants.lookup(id).member(disclose(me)), "Athlete has not joined this challenge");
+
+  // Private inputs — asserted, never disclosed.
+  assert(workoutsInWindow(challengeId) >= challenge.requiredWorkouts, "Not enough workouts in the challenge window");
+  assert(longestStreak() >= challenge.requiredStreak, "Required streak not reached");
+  assert(bestLiftKg() >= challenge.requiredStrengthKg, "Required strength milestone not reached");
+
+  const achievement = disclose(achievementId(me, id));
+  assert(!achievements.member(achievement), "Achievement already verified");
+  achievements.insert(achievement, disclose(me));
+  achievementChallenge.insert(achievement, id);
+  verifiedCount.increment(1);
+  return achievement;
+}
+
+/**
+ * Proves a standalone workout-count milestone (e.g. the 100 Workout Club)
+ * against a published challenge threshold, again without revealing workouts.
+ */
+export circuit proveWorkoutCount(challengeId: Bytes<32>): Bytes<32> {
+  const id = disclose(challengeId);
+  assert(challenges.member(id), "Unknown challenge");
+  const challenge = challenges.lookup(id);
+  const me = athleteCommitment(localSecretKey());
+  assert(athletes.member(disclose(me)), "Athlete is not registered");
+  assert(workoutsInWindow(challengeId) >= challenge.requiredWorkouts, "Workout count requirement not satisfied");
+
+  const achievement = disclose(achievementId(me, id));
+  assert(!achievements.member(achievement), "Achievement already verified");
+  achievements.insert(achievement, disclose(me));
+  achievementChallenge.insert(achievement, id);
+  verifiedCount.increment(1);
+  return achievement;
+}
+
+/** Proves a consecutive-day streak milestone without revealing training dates. */
+export circuit proveWorkoutStreak(challengeId: Bytes<32>): Bytes<32> {
+  const id = disclose(challengeId);
+  assert(challenges.member(id), "Unknown challenge");
+  const challenge = challenges.lookup(id);
+  const me = athleteCommitment(localSecretKey());
+  assert(athletes.member(disclose(me)), "Athlete is not registered");
+  assert(longestStreak() >= challenge.requiredStreak, "Streak requirement not satisfied");
+
+  const achievement = disclose(achievementId(me, id));
+  assert(!achievements.member(achievement), "Achievement already verified");
+  achievements.insert(achievement, disclose(me));
+  achievementChallenge.insert(achievement, id);
+  verifiedCount.increment(1);
+  return achievement;
+}
