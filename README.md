@@ -1,5 +1,14 @@
 # Gym Verifier
+The GymProof contract is currently deployed on the Midnight Preview Testnet.
 
+Here are the specific testnet server details and endpoints being used for the application:
+
+Network Name: Midnight Preview Testnet (preview)
+Contract Address: 73ebc93997086b6b0387c5c99461e893073730af5939a11846042f351f04c04d
+Indexer API Server: https://indexer.preview.midnight.network/api/v4/graphql
+Indexer WebSocket Server: wss://indexer.preview.midnight.network/api/v4/graphql/ws
+RPC/Node Server: wss://rpc.preview.midnight.network/
+Locally, the application also relies on a local Proof Server running at http://127.0.0.1:6300 to generate the Zero-Knowledge proofs before sending them to the Midnight testnet.
 GYMPROOF — BUILD A PRODUCTION-QUALITY PRIVACY-FIRST FITNESS DAPP ON MIDNIGHT
 
 I have attached a ZIP containing a working/sample Bboard project.
